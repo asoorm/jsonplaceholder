@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
+	"net/http/httputil"
 	"os"
 	"strconv"
 
@@ -48,7 +50,21 @@ func main() {
 	loadFromDB("db/posts.json", "posts")
 	loadFromDB("db/comments.json", "comments")
 
+	reqResRecorder := func(writer io.Writer) func(next http.Handler) http.Handler {
+		return func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				reqBytes, _ := httputil.DumpRequest(r, true)
+				writer.Write([]byte("===\n"))
+				writer.Write(reqBytes)
+				writer.Write([]byte("\n\n"))
+
+				next.ServeHTTP(w, r)
+			})
+		}
+	}
+
 	muxer := chi.NewMux()
+	muxer.Use(reqResRecorder(os.Stdout))
 
 	muxer.Get("/users", func(w http.ResponseWriter, r *http.Request) {
 		jsBytes, _ := json.Marshal(userData)
@@ -56,13 +72,82 @@ func main() {
 		w.Write(jsBytes)
 	})
 
+	muxer.Post("/users", func(w http.ResponseWriter, r *http.Request) {
+		decoder := json.NewDecoder(r.Body)
+		u := model.User{}
+		err := decoder.Decode(&u)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(err.Error()))
+			return
+		}
+
+		if u.Id == 0 {
+			// we need a user id
+
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte("missing user id"))
+			return
+		}
+
+		for _, user := range userData {
+			if u.Id == user.Id {
+
+				w.WriteHeader(http.StatusConflict)
+				w.Write([]byte("user already exists"))
+				return
+			}
+		}
+
+		userData = append(userData, u)
+
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(http.StatusText(http.StatusCreated)))
+	})
+
 	muxer.Get("/users/{id}", func(w http.ResponseWriter, r *http.Request) {
+		userIDString := chi.URLParam(r, "id")
+		userID, err := strconv.Atoi(userIDString)
+		if err != nil {
+			panic(err.Error())
+		}
+
+		for _, u := range userData {
+			if u.Id == userID {
+
+				jsBytes, _ := json.Marshal(u)
+				w.Header().Set("Content-Type", "application/json")
+				w.Write(jsBytes)
+
+				return
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(http.StatusText(http.StatusNotFound)))
+	})
+
+	muxer.Delete("/users/{id}", func(w http.ResponseWriter, r *http.Request) {
 		userIDString := chi.URLParam(r, "id")
 		userID, _ := strconv.Atoi(userIDString)
 
-		jsBytes, _ := json.Marshal(userData[userID-1])
+		for index, u := range userData {
+			if u.Id == userID {
+				newUsers := make([]model.User, 0)
+				newUsers = append(newUsers, userData[:index]...)
+				newUsers = append(newUsers, userData[index+1:]...)
+
+				userData = newUsers
+
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+		}
+
+		w.WriteHeader(http.StatusNotFound)
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(jsBytes)
+		w.Write([]byte(http.StatusText(http.StatusNotFound)))
 	})
 
 	muxer.Get("/users/{id}/posts", func(w http.ResponseWriter, r *http.Request) {
